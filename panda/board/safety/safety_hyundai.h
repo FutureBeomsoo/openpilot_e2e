@@ -29,6 +29,10 @@ const CanMsg HYUNDAI_TX_MSGS[] = {
   {832, 0, 8},  // LKAS11 Bus 0
   {1265, 0, 4}, // CLU11 Bus 0
   {1157, 0, 4}, // LFAHDA_MFC Bus 0
+  {912, 0, 7}, {912, 1, 7},    // SPAS11 Bus 0, 1
+  {1268, 0, 8}, {1268, 1, 8},  // SPAS12 Bus 0, 1
+  {881, 1, 8},  // E_EMS11 Bus 1 (SPAS speed spoofing)
+  {882, 1, 8},  // ELECT_GEAR Bus 1 (SPAS gear spoofing)
 };
 
 const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
@@ -43,12 +47,20 @@ const CanMsg HYUNDAI_LONG_TX_MSGS[] = {
   {909, 0, 8},  // FCA11 Bus 0
   {1155, 0, 8}, // FCA12 Bus 0
   {2000, 0, 8}, // radar UDS TX addr Bus 0 (for radar disable)
+  {912, 0, 7}, {912, 1, 7},    // SPAS11 Bus 0, 1
+  {1268, 0, 8}, {1268, 1, 8},  // SPAS12 Bus 0, 1
+  {881, 1, 8},  // E_EMS11 Bus 1 (SPAS speed spoofing)
+  {882, 1, 8},  // ELECT_GEAR Bus 1 (SPAS gear spoofing)
 };
 
 const CanMsg HYUNDAI_CAMERA_SCC_TX_MSGS[] = {
   {832, 0, 8},  // LKAS11 Bus 0
   {1265, 2, 4}, // CLU11 Bus 2
   {1157, 0, 4}, // LFAHDA_MFC Bus 0
+  {912, 0, 7}, {912, 1, 7},    // SPAS11 Bus 0, 1
+  {1268, 0, 8}, {1268, 1, 8},  // SPAS12 Bus 0, 1
+  {881, 1, 8},  // E_EMS11 Bus 1 (SPAS speed spoofing)
+  {882, 1, 8},  // ELECT_GEAR Bus 1 (SPAS gear spoofing)
 };
 
 AddrCheckStruct hyundai_addr_checks[] = {
@@ -287,6 +299,22 @@ static int hyundai_tx_hook(CANPacket_t *to_send) {
   // UDS: Only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address
   if (addr == 2000) {
     if ((GET_BYTES(to_send, 0, 4) != 0x00803E02U) || (GET_BYTES(to_send, 4, 4) != 0x0U)) {
+      tx = 0;
+    }
+  }
+
+  // SPAS11: steering angle safety check
+  if (addr == 912) {
+    int spas_state = GET_BYTE(to_send, 0) & 0xFU;
+    int raw_angle_can = (GET_BYTE(to_send, 2) << 8) | GET_BYTE(to_send, 1);
+    int desired_angle = (raw_angle_can >= 32768) ? raw_angle_can - 65536 : raw_angle_can;
+
+    // Block SPAS steering (state 5) when controls not allowed
+    if (!controls_allowed && (spas_state == 5)) {
+      tx = 0;
+    }
+    // Max angle check: 3600 = 360.0 degrees * 10 (DBC scale factor)
+    if ((desired_angle > 3600) || (desired_angle < -3600)) {
       tx = 0;
     }
   }

@@ -83,6 +83,18 @@ TogglesPanel::TogglesPanel(SettingsWindow *parent) : ListWidget(parent) {
       "../assets/offroad/icon_road.png",
     },
 #endif
+    {
+      "SpasEnabled",
+      tr("Enable SPAS Steering Control"),
+      tr("Enable Smart Parking Assist System (SPAS) steering angle control. When active, openpilot controls steering via SPAS angle commands instead of LKAS torque at low speeds or large steering angles. Requires vehicle with SPAS-capable MDPS ECU and 3-bus CAN configuration (Bus 1 = MDPS)."),
+      "../assets/offroad/icon_openpilot.png",
+    },
+    {
+      "SpasDebug",
+      tr("SPAS Debug Logging"),
+      tr("Enable SPAS debug output to console. Shows MDPS state, SPAS state, steering angle, and driver torque information."),
+      "../assets/offroad/icon_shell.png",
+    },
   };
 
 

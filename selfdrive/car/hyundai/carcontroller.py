@@ -1,11 +1,13 @@
 from cereal import car
 from common.conversions import Conversions as CV
 from common.numpy_fast import clip
+from common.params import Params
 from common.realtime import DT_CTRL
 from opendbc.can.packer import CANPacker
 from selfdrive.car import apply_driver_steer_torque_limits
 from selfdrive.car.hyundai import hyundaicanfd, hyundaican
 from selfdrive.car.hyundai.hyundaicanfd import CanBus
+from selfdrive.car.hyundai.spas_controller import SpasController
 from selfdrive.car.hyundai.values import HyundaiFlags, Buttons, CarControllerParams, CANFD_CAR, CAR
 
 VisualAlert = car.CarControl.HUDControl.VisualAlert
@@ -55,6 +57,10 @@ class CarController:
     self.apply_steer_last = 0
     self.car_fingerprint = CP.carFingerprint
     self.last_button_frame = 0
+
+    # SPAS
+    self.spas_enabled = Params().get_bool('SpasEnabled')
+    self.spas_controller = SpasController(CP.carFingerprint) if self.spas_enabled else None
 
   def update(self, CC, CS, now_nanos):
     actuators = CC.actuators
@@ -108,6 +114,11 @@ class CarController:
     if self.angle_limit_counter >= MAX_ANGLE_FRAMES + MAX_ANGLE_CONSECUTIVE_FRAMES:
       self.angle_limit_counter = 0
 
+    # SPAS: disable LKAS torque when MDPS is in SPAS steering mode (state 5)
+    if self.spas_enabled and CS.spas_mdps11_stat == 5:
+      lat_active = False
+      apply_steer = 0
+
     # CAN-FD platforms
     if self.CP.carFingerprint in CANFD_CAR:
       hda2 = self.CP.flags & HyundaiFlags.CANFD_HDA2
@@ -158,6 +169,11 @@ class CarController:
                 can_sends.append(hyundaicanfd.create_buttons(self.packer, self.CP, self.CAN, CS.buttons_counter+1, Buttons.RES_ACCEL))
               self.last_button_frame = self.frame
     else:
+      # SPAS controller (non-CANFD legacy CAN cars)
+      if self.spas_controller is not None:
+        self.spas_controller.update(CC, CS, actuators, self.frame, self.params.STEER_MAX,
+                                    self.packer, apply_steer, can_sends)
+
       can_sends.append(hyundaican.create_lkas11(self.packer, self.frame, self.car_fingerprint, apply_steer, lat_active,
                                                 torque_fault, CS.lkas11, sys_warning, sys_state, CC.enabled,
                                                 hud_control.leftLaneVisible, hud_control.rightLaneVisible,

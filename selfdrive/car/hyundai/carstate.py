@@ -7,6 +7,7 @@ from common.conversions import Conversions as CV
 from opendbc.can.parser import CANParser
 from opendbc.can.can_define import CANDefine
 from selfdrive.car.hyundai.hyundaicanfd import CanBus
+from common.params import Params
 from selfdrive.car.hyundai.values import HyundaiFlags, CAR, DBC, CAN_GEARS, CAMERA_SCC_CAR, CANFD_CAR, EV_CAR, HYBRID_CAR, Buttons, CarControllerParams
 from selfdrive.car.interfaces import CarStateBase
 
@@ -45,7 +46,18 @@ class CarState(CarStateBase):
 
     self.params = CarControllerParams(CP)
 
-  def update(self, cp, cp_cam):
+    # SPAS
+    self.spas_enabled = Params().get_bool('SpasEnabled')
+    self.spas_mdps11_stat = 0
+    self.spas_mdps11_strang = 0.
+    self.spas_steering_pressed = False
+    self.spas_eems11 = {}
+    self.spas_elect_gear_shifter = 0
+    # Wheel momentum rate factor for SPAS driver override detection
+    self.spas_angle_delta_bp = [0., 5., 10., 20., 30., 40., 50., 60., 70.]
+    self.spas_angle_delta_v = [1., 1.1, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45]
+
+  def update(self, cp, cp_cam, cp_body=None):
     if self.CP.carFingerprint in CANFD_CAR:
       return self.update_canfd(cp, cp_cam)
 
@@ -153,6 +165,21 @@ class CarState(CarStateBase):
     self.prev_cruise_buttons = self.cruise_buttons[-1]
     self.cruise_buttons.extend(cp.vl_all["CLU11"]["CF_Clu_CruiseSwState"])
     self.main_buttons.extend(cp.vl_all["CLU11"]["CF_Clu_CruiseSwMain"])
+
+    # SPAS signal parsing from Bus 1 (MDPS CAN)
+    if self.spas_enabled and cp_body is not None:
+      from common.numpy_fast import interp, clip
+      self.spas_mdps11_stat = cp_body.vl["MDPS11"]["CF_Mdps_Stat"]
+      self.spas_mdps11_strang = cp_body.vl["MDPS11"]["CR_Mdps_StrAng"]
+      # Rate factor for driver override detection
+      sas_speed = abs(cp.vl["SAS11"]["SAS_Speed"])
+      rate_factor = clip(interp(sas_speed, self.spas_angle_delta_bp, self.spas_angle_delta_v), 1.0, 1.45)
+      self.spas_steering_pressed = abs(ret.steeringTorque) > self.params.STEER_THRESHOLD + (210 * rate_factor) \
+        if self.spas_mdps11_stat == 5 else abs(ret.steeringTorque) > self.params.STEER_THRESHOLD
+      # E_EMS11 values for spoofing
+      self.spas_eems11 = copy.copy(cp_body.vl["E_EMS11"])
+      # ELECT_GEAR shifter value for spoofing
+      self.spas_elect_gear_shifter = cp_body.vl["ELECT_GEAR"]["Elect_Gear_Shifter"]
 
     return ret
 
@@ -367,6 +394,35 @@ class CarState(CarStateBase):
       checks.append(("LVR12", 100))
 
     return CANParser(DBC[CP.carFingerprint]["pt"], signals, checks, 0)
+
+  @staticmethod
+  def get_body_can_parser(CP):
+    """Bus 1 (MDPS CAN) parser for SPAS signals."""
+    if CP.carFingerprint in CANFD_CAR or not Params().get_bool('SpasEnabled'):
+      return None
+
+    signals = [
+      # MDPS11 - SPAS state and steering angle feedback
+      ("CF_Mdps_Stat", "MDPS11"),
+      ("CR_Mdps_StrAng", "MDPS11"),
+      ("CR_Mdps_DrvTq", "MDPS11"),
+      # E_EMS11 - for spoofing on Bus 1
+      ("Brake_Pedal_Pos", "E_EMS11"),
+      ("IG_Reactive_Stat", "E_EMS11"),
+      ("Gear_Change", "E_EMS11"),
+      ("Cruise_Limit_Status", "E_EMS11"),
+      ("Cruise_Limit_Target", "E_EMS11"),
+      ("Accel_Pedal_Pos", "E_EMS11"),
+      ("CR_Vcu_AccPedDep_Pos", "E_EMS11"),
+      # ELECT_GEAR - gear shifter for spoofing
+      ("Elect_Gear_Shifter", "ELECT_GEAR"),
+    ]
+    checks = [
+      ("MDPS11", 100),
+      ("E_EMS11", 50),
+      ("ELECT_GEAR", 20),
+    ]
+    return CANParser(DBC[CP.carFingerprint]["pt"], signals, checks, 1)
 
   @staticmethod
   def get_cam_can_parser(CP):
