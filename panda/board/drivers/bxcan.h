@@ -199,6 +199,7 @@ void can_rx(uint8_t can_number) {
     can_set_checksum(&to_push);
 
     // forwarding (panda only)
+    // fwd_hook returns: -1 = no fwd, 0-2 = single bus, 3+ = bitmask (bit0=bus0, bit1=bus1, bit2=bus2)
     int bus_fwd_num = safety_fwd_hook(bus_number, to_push.addr);
     if (bus_fwd_num != -1) {
       CANPacket_t to_send;
@@ -212,8 +213,19 @@ void can_rx(uint8_t can_number) {
       (void)memcpy(to_send.data, to_push.data, dlc_to_len[to_push.data_len_code]);
       can_set_checksum(&to_send);
 
-      can_send(&to_send, bus_fwd_num, true);
-      can_health[can_number].total_fwd_cnt += 1U;
+      if (bus_fwd_num >= 3) {
+        // bitmask mode: forward to multiple buses
+        for (uint8_t i = 0U; i < 3U; i++) {
+          if ((bus_fwd_num & (1 << i)) && (i != bus_number)) {
+            can_send(&to_send, i, true);
+            can_health[can_number].total_fwd_cnt += 1U;
+          }
+        }
+      } else {
+        // single bus mode (backward compatible)
+        can_send(&to_send, bus_fwd_num, true);
+        can_health[can_number].total_fwd_cnt += 1U;
+      }
     }
 
     safety_rx_invalid += safety_rx_hook(&to_push) ? 0U : 1U;

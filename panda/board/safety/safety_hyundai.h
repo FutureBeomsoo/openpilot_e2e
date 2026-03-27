@@ -194,7 +194,8 @@ static int hyundai_rx_hook(CANPacket_t *to_push) {
     hyundai_common_cruise_state_check(cruise_engaged);
   }
 
-  if (valid && (bus == 0)) {
+  if (valid && (bus == 0 || bus == 1)) {
+    // MDPS12 driver torque (may come from Bus 0 or Bus 1 depending on vehicle)
     if (addr == 593) {
       int torque_driver_new = ((GET_BYTES(to_push, 0, 4) & 0x7ffU) * 0.79) - 808; // scale down new driver torque signal to match previous one
       // update array of samples
@@ -337,12 +338,33 @@ static int hyundai_fwd_hook(int bus_num, int addr) {
 
   int bus_fwd = -1;
 
-  // forward cam to ccan and viceversa, except lkas cmd
+  // 3-bus routing: Bus 0 (Chassis), Bus 1 (MDPS), Bus 2 (LKAS/SCC)
+  // bitmask: bit0=bus0(1), bit1=bus1(2), bit2=bus2(4)
+
+  // Bus 0 (Chassis) → Bus 1 (MDPS) + Bus 2 (Camera)
   if (bus_num == 0) {
-    bus_fwd = 2;
+    // ELECT_GEAR(882) and E_EMS11(881): don't forward to Bus 1
+    // openpilot sends spoofed versions to Bus 1 instead
+    if (addr == 882 || addr == 881) {
+      bus_fwd = 4;  // 0b100 = Bus 2 only
+    } else {
+      bus_fwd = 6;  // 0b110 = Bus 1 + Bus 2
+    }
   }
-  if ((bus_num == 2) && (addr != 832) && (addr != 1157)) {
-    bus_fwd = 0;
+
+  // Bus 1 (MDPS) → Bus 0 (Chassis) + Bus 2 (Camera)
+  if (bus_num == 1) {
+    bus_fwd = 5;  // 0b101 = Bus 0 + Bus 2
+  }
+
+  // Bus 2 (Camera) → Bus 0 (Chassis) + Bus 1 (MDPS)
+  // Block LKAS11(832) and LFAHDA_MFC(1157): openpilot generates these
+  if (bus_num == 2) {
+    if (addr == 832 || addr == 1157) {
+      bus_fwd = -1;  // blocked, openpilot sends spoofed version
+    } else {
+      bus_fwd = 3;  // 0b011 = Bus 0 + Bus 1
+    }
   }
 
   return bus_fwd;
