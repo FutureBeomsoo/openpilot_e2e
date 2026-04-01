@@ -338,34 +338,28 @@ static int hyundai_fwd_hook(int bus_num, int addr) {
 
   int bus_fwd = -1;
 
-  // 3-bus routing: Bus 0 (Chassis), Bus 1 (MDPS), Bus 2 (LKAS/SCC)
+  // 3-bus routing: Bus 0 (Chassis), Bus 1 (Radar+MDPS), Bus 2 (Camera+SCC)
   // bitmask: bit0=bus0(1), bit1=bus1(2), bit2=bus2(4)
 
-  // Bus 0 (Chassis) → Bus 1 (MDPS) + Bus 2 (Camera)
+  // Bus 0 → Bus 1 + Bus 2 (ELECT_GEAR excluded from Bus 1, openpilot spoofs it)
   if (bus_num == 0) {
-    // ELECT_GEAR(882) and E_EMS11(881): don't forward to Bus 1
-    // openpilot sends spoofed versions to Bus 1 instead
-    if (addr == 882 || addr == 881) {
+    if (addr == 882) {
       bus_fwd = 4;  // 0b100 = Bus 2 only
     } else {
       bus_fwd = 6;  // 0b110 = Bus 1 + Bus 2
     }
   }
 
-  // Bus 1 (MDPS) → Bus 0 (Chassis) + Bus 2 (Camera)
+  // Bus 1 → Bus 0 + Bus 2 (MDPS messages only, radar excluded)
   if (bus_num == 1) {
-    bus_fwd = 5;  // 0b101 = Bus 0 + Bus 2
+    if (addr == 593 || addr == 688 || addr == 897) {
+      bus_fwd = 5;  // 0b101 = Bus 0 + Bus 2
+    }
+    // else -1: radar messages not forwarded
   }
 
-  // Bus 2 (Camera) → Bus 0 (Chassis) + Bus 1 (MDPS)
-  // Block LKAS11(832) and LFAHDA_MFC(1157): openpilot generates these
-  if (bus_num == 2) {
-    if (addr == 832 || addr == 1157) {
-      bus_fwd = -1;  // blocked, openpilot sends spoofed version
-    } else {
-      bus_fwd = 3;  // 0b011 = Bus 0 + Bus 1
-    }
-  }
+  // Bus 2 → no forwarding (openpilot reads and creates spoofed messages)
+  // bus_fwd stays -1
 
   return bus_fwd;
 }

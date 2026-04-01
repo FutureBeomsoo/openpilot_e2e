@@ -62,7 +62,9 @@ class CarState(CarStateBase):
       return self.update_canfd(cp, cp_cam)
 
     ret = car.CarState.new_message()
-    cp_cruise = cp_cam if self.CP.carFingerprint in CAMERA_SCC_CAR else cp
+    # SPAS config: MDPS on Bus 1 (cp_body), SCC on Bus 2 (cp_cam)
+    cp_mdps = cp_body if (self.spas_enabled and cp_body is not None) else cp
+    cp_cruise = cp_cam if (self.CP.carFingerprint in CAMERA_SCC_CAR or self.spas_enabled) else cp
     self.is_metric = cp.vl["CLU11"]["CF_Clu_SPEED_UNIT"] == 0
     speed_conv = CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS
 
@@ -94,15 +96,15 @@ class CarState(CarStateBase):
 
     ret.vEgoCluster = self.cluster_speed * speed_conv
 
-    ret.steeringAngleDeg = cp.vl["SAS11"]["SAS_Angle"]
-    ret.steeringRateDeg = cp.vl["SAS11"]["SAS_Speed"]
+    ret.steeringAngleDeg = cp_mdps.vl["SAS11"]["SAS_Angle"]
+    ret.steeringRateDeg = cp_mdps.vl["SAS11"]["SAS_Speed"]
     ret.yawRate = cp.vl["ESP12"]["YAW_RATE"]
     ret.leftBlinker, ret.rightBlinker = self.update_blinker_from_lamp(
       50, cp.vl["CGW1"]["CF_Gway_TurnSigLh"], cp.vl["CGW1"]["CF_Gway_TurnSigRh"])
-    ret.steeringTorque = cp.vl["MDPS12"]["CR_Mdps_StrColTq"]
-    ret.steeringTorqueEps = cp.vl["MDPS12"]["CR_Mdps_OutTq"]
+    ret.steeringTorque = cp_mdps.vl["MDPS12"]["CR_Mdps_StrColTq"]
+    ret.steeringTorqueEps = cp_mdps.vl["MDPS12"]["CR_Mdps_OutTq"]
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > self.params.STEER_THRESHOLD, 5)
-    ret.steerFaultTemporary = cp.vl["MDPS12"]["CF_Mdps_ToiUnavail"] != 0 or cp.vl["MDPS12"]["CF_Mdps_ToiFlt"] != 0
+    ret.steerFaultTemporary = cp_mdps.vl["MDPS12"]["CF_Mdps_ToiUnavail"] != 0 or cp_mdps.vl["MDPS12"]["CF_Mdps_ToiFlt"] != 0
 
     # cruise state
     if self.CP.openpilotLongitudinalControl:
@@ -161,25 +163,24 @@ class CarState(CarStateBase):
     # save the entire LKAS11 and CLU11
     self.lkas11 = copy.copy(cp_cam.vl["LKAS11"])
     self.clu11 = copy.copy(cp.vl["CLU11"])
-    self.steer_state = cp.vl["MDPS12"]["CF_Mdps_ToiActive"]  # 0 NOT ACTIVE, 1 ACTIVE
+    self.steer_state = cp_mdps.vl["MDPS12"]["CF_Mdps_ToiActive"]  # 0 NOT ACTIVE, 1 ACTIVE
     self.prev_cruise_buttons = self.cruise_buttons[-1]
     self.cruise_buttons.extend(cp.vl_all["CLU11"]["CF_Clu_CruiseSwState"])
     self.main_buttons.extend(cp.vl_all["CLU11"]["CF_Clu_CruiseSwMain"])
 
-    # SPAS signal parsing from Bus 1 (MDPS CAN)
+    # SPAS signal parsing
     if self.spas_enabled and cp_body is not None:
       from common.numpy_fast import interp, clip
+      # MDPS11 from Bus 1
       self.spas_mdps11_stat = cp_body.vl["MDPS11"]["CF_Mdps_Stat"]
       self.spas_mdps11_strang = cp_body.vl["MDPS11"]["CR_Mdps_StrAng"]
-      # Rate factor for driver override detection
-      sas_speed = abs(cp.vl["SAS11"]["SAS_Speed"])
+      # Rate factor for driver override detection (SAS11 from Bus 1)
+      sas_speed = abs(cp_body.vl["SAS11"]["SAS_Speed"])
       rate_factor = clip(interp(sas_speed, self.spas_angle_delta_bp, self.spas_angle_delta_v), 1.0, 1.45)
       self.spas_steering_pressed = abs(ret.steeringTorque) > self.params.STEER_THRESHOLD + (210 * rate_factor) \
         if self.spas_mdps11_stat == 5 else abs(ret.steeringTorque) > self.params.STEER_THRESHOLD
-      # E_EMS11 values for spoofing
-      self.spas_eems11 = copy.copy(cp_body.vl["E_EMS11"])
-      # ELECT_GEAR shifter value for spoofing
-      self.spas_elect_gear_shifter = cp_body.vl["ELECT_GEAR"]["Elect_Gear_Shifter"]
+      # ELECT_GEAR from Bus 0 for spoofing to Bus 1
+      self.spas_elect_gear_shifter = cp.vl["ELECT_GEAR"]["Elect_Gear_Shifter"]
 
     return ret
 
@@ -307,18 +308,24 @@ class CarState(CarStateBase):
       ("ESC_Off_Step", "TCS15"),
       ("AVH_LAMP", "TCS15"),
 
-      ("CR_Mdps_StrColTq", "MDPS12"),
-      ("CF_Mdps_ToiActive", "MDPS12"),
-      ("CF_Mdps_ToiUnavail", "MDPS12"),
-      ("CF_Mdps_ToiFlt", "MDPS12"),
-      ("CR_Mdps_OutTq", "MDPS12"),
-
-      ("SAS_Angle", "SAS11"),
-      ("SAS_Speed", "SAS11"),
     ]
+
+    spas_enabled = Params().get_bool('SpasEnabled')
+
+    # MDPS12/SAS11: on Bus 0 normally, on Bus 1 when SPAS (read via get_body_can_parser)
+    if not spas_enabled:
+      signals += [
+        ("CR_Mdps_StrColTq", "MDPS12"),
+        ("CF_Mdps_ToiActive", "MDPS12"),
+        ("CF_Mdps_ToiUnavail", "MDPS12"),
+        ("CF_Mdps_ToiFlt", "MDPS12"),
+        ("CR_Mdps_OutTq", "MDPS12"),
+        ("SAS_Angle", "SAS11"),
+        ("SAS_Speed", "SAS11"),
+      ]
+
     checks = [
       # address, frequency
-      ("MDPS12", 50),
       ("TCS13", 50),
       ("TCS15", 10),
       ("CLU11", 50),
@@ -328,10 +335,16 @@ class CarState(CarStateBase):
       ("CGW2", 5),
       ("CGW4", 5),
       ("WHL_SPD11", 50),
-      ("SAS11", 100),
     ]
 
-    if not CP.openpilotLongitudinalControl and CP.carFingerprint not in CAMERA_SCC_CAR:
+    if not spas_enabled:
+      checks += [
+        ("MDPS12", 50),
+        ("SAS11", 100),
+      ]
+
+    # SCC: on Bus 0 normally, on Bus 2 when SPAS (read via get_cam_can_parser)
+    if not CP.openpilotLongitudinalControl and CP.carFingerprint not in CAMERA_SCC_CAR and not spas_enabled:
       signals += [
         ("MainMode_ACC", "SCC11"),
         ("VSetDis", "SCC11"),
@@ -397,30 +410,29 @@ class CarState(CarStateBase):
 
   @staticmethod
   def get_body_can_parser(CP):
-    """Bus 1 (MDPS CAN) parser for SPAS signals."""
+    """Bus 1 (Radar+MDPS CAN) parser for MDPS/SAS signals."""
     if CP.carFingerprint in CANFD_CAR or not Params().get_bool('SpasEnabled'):
       return None
 
     signals = [
+      # MDPS12 - steering torque
+      ("CR_Mdps_StrColTq", "MDPS12"),
+      ("CF_Mdps_ToiActive", "MDPS12"),
+      ("CF_Mdps_ToiUnavail", "MDPS12"),
+      ("CF_Mdps_ToiFlt", "MDPS12"),
+      ("CR_Mdps_OutTq", "MDPS12"),
+      # SAS11 - steering angle sensor
+      ("SAS_Angle", "SAS11"),
+      ("SAS_Speed", "SAS11"),
       # MDPS11 - SPAS state and steering angle feedback
       ("CF_Mdps_Stat", "MDPS11"),
       ("CR_Mdps_StrAng", "MDPS11"),
       ("CR_Mdps_DrvTq", "MDPS11"),
-      # E_EMS11 - for spoofing on Bus 1
-      ("Brake_Pedal_Pos", "E_EMS11"),
-      ("IG_Reactive_Stat", "E_EMS11"),
-      ("Gear_Change", "E_EMS11"),
-      ("Cruise_Limit_Status", "E_EMS11"),
-      ("Cruise_Limit_Target", "E_EMS11"),
-      ("Accel_Pedal_Pos", "E_EMS11"),
-      ("CR_Vcu_AccPedDep_Pos", "E_EMS11"),
-      # ELECT_GEAR - gear shifter for spoofing
-      ("Elect_Gear_Shifter", "ELECT_GEAR"),
     ]
     checks = [
+      ("MDPS12", 50),
+      ("SAS11", 100),
       ("MDPS11", 100),
-      ("E_EMS11", 50),
-      ("ELECT_GEAR", 20),
     ]
     return CANParser(DBC[CP.carFingerprint]["pt"], signals, checks, 1)
 
@@ -451,7 +463,9 @@ class CarState(CarStateBase):
       ("LKAS11", 100)
     ]
 
-    if not CP.openpilotLongitudinalControl and CP.carFingerprint in CAMERA_SCC_CAR:
+    # SCC on Bus 2: for CAMERA_SCC cars OR SPAS config (SCC moved to camera bus)
+    spas_enabled = Params().get_bool('SpasEnabled')
+    if not CP.openpilotLongitudinalControl and (CP.carFingerprint in CAMERA_SCC_CAR or spas_enabled):
       signals += [
         ("MainMode_ACC", "SCC11"),
         ("VSetDis", "SCC11"),

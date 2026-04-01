@@ -14,9 +14,9 @@ STEER_ANG_MAX = 360  # SPAS Max Angle (degrees)
 ANGLE_DELTA_BP = [0., 10., 20.]
 ANGLE_DELTA_V = [1.19, 1.14, 1.09]    # windup limit
 ANGLE_DELTA_VU = [1.29, 1.19, 1.14]   # unwind limit
-SPAS_OVERRIDE_TQ = 290  # driver override torque threshold (unit: torque / 100 = Nm)
-SPAS_SWITCH_SPEED = 30 * CV.MPH_TO_MS  # speed threshold for dynamic SPAS/LKAS switching
-STEER_MAX_OFFSET = 105  # torque offset for dynamic SPAS engagement
+SPAS_OVERRIDE_TQ = 290
+SPAS_SWITCH_SPEED = 30 * CV.MPH_TO_MS
+STEER_MAX_OFFSET = 105
 
 
 class SpasController:
@@ -38,13 +38,11 @@ class SpasController:
       events.add(EventName.steerTempUnavailable)
 
   def update(self, CC, CS, actuators, frame, steer_max, packer, apply_steer, can_sends):
-    """Main SPAS controller update - called every frame when SPAS is enabled."""
-    # Track steering wheel rate
+    """Main SPAS controller update."""
     self.rate = abs(CS.out.steeringAngleDeg - self.lastSteeringAngleDeg)
     apply_angle = clip(actuators.steeringAngleDeg, -STEER_ANG_MAX, STEER_ANG_MAX)
     apply_diff = abs(apply_angle - CS.out.steeringAngleDeg)
 
-    # Determine if SPAS should be active
     spas_active = (
       CC.latActive and
       CS.out.vEgo < 26.82 and
@@ -54,17 +52,15 @@ class SpasController:
        (steer_max - STEER_MAX_OFFSET < abs(apply_steer)))
     )
 
-    # Rate limiting (runs at SPAS11 message rate = 50Hz, every 2 frames)
+    # Rate limiting (50Hz, every 2 frames)
     if (frame % 2) == 0:
       if CS.spas_mdps11_stat == 5 and apply_diff > 1.75:
-        # Engage rate: ramp up when angle difference is large
         self.ratelimit += 0.03
         rate_limit = max(self.ratelimit, 10)
         apply_angle = clip(apply_angle,
                            CS.out.steeringAngleDeg - rate_limit,
                            CS.out.steeringAngleDeg + rate_limit)
       elif CS.spas_mdps11_stat == 5:
-        # Normal operation rate limiter
         self.ratelimit = 2.3
         if self.last_apply_angle * apply_angle > 0. and abs(apply_angle) > abs(self.last_apply_angle):
           rate_limit = interp(CS.out.vEgo, ANGLE_DELTA_BP, ANGLE_DELTA_V)
@@ -87,55 +83,46 @@ class SpasController:
 
     self.last_apply_angle = apply_angle
 
-    # SPAS State Machine
-    # Speed spoofing when MDPS is in states 3, 4, or 5
-    spas_active_stat = spas_active and CS.spas_mdps11_stat in (3, 4, 5)
-
-    # EMS spoofing on Bus 1 (MDPS CAN) - for EV: E_EMS11
-    can_sends.append(_create_eems11(packer, CS.spas_eems11, spas_active_stat))
-
-    # ELECT_GEAR spoofing on Bus 1 - keep gear shifter, zero the rest
-    can_sends.append(_create_elect_gear_spoof(packer, CS.spas_elect_gear_shifter, spas_active_stat))
+    # ELECT_GEAR spoofing on Bus 1
+    # Engage: zero everything except Elect_Gear_Shifter
+    # Normal: passthrough original values
+    engaged = CC.enabled
+    can_sends.append(_create_elect_gear(packer, CS.spas_elect_gear_shifter, engaged))
 
     if (frame % 2) == 0:
-      # SPAS State Machine transitions
+      # SPAS State Machine
       if CS.spas_mdps11_stat == 7 and self.mdps11_stat_last != 7:
-        self.en_spas = 7  # Acknowledge MDPS state 7
-
+        self.en_spas = 7
       if CS.spas_mdps11_stat == 7 and self.mdps11_stat_last == 7:
-        self.en_spas = 3  # Ready for next steer
-
+        self.en_spas = 3
       if CS.spas_mdps11_stat == 2 and spas_active:
-        self.en_spas = 3  # Ready to Assist
-
+        self.en_spas = 3
       if CS.spas_mdps11_stat == 3 and spas_active:
-        self.en_spas = 4  # Handshake
-
+        self.en_spas = 4
       if CS.spas_mdps11_stat == 4:
-        self.en_spas = 5  # Request steering
-
+        self.en_spas = 5
       if CS.spas_mdps11_stat == 5 and not spas_active:
-        self.en_spas = 7  # Cancel SPAS
-
+        self.en_spas = 7
       if CS.spas_mdps11_stat == 6:
-        self.en_spas = 2  # Failed, reset
-
+        self.en_spas = 2
       if CS.spas_mdps11_stat == 8:
-        self.en_spas = 2  # Failed to get ready, reset
+        self.en_spas = 2
 
-      # Monitor MDPS error states
       self.steer_temp_unavailable = CS.spas_mdps11_stat in (6, 8)
 
       if not spas_active:
         apply_angle = CS.spas_mdps11_strang
 
-      # Send SPAS11 message
+      # SPAS11 to Bus 0 (main/debug) and Bus 1 (MDPS control)
       can_sends.append(_create_spas11(packer, self.car_fingerprint, frame // 2,
-                                      self.en_spas, apply_angle, 1))  # bus=1 (MDPS CAN)
+                                      self.en_spas, apply_angle, 0))
+      can_sends.append(_create_spas11(packer, self.car_fingerprint, frame // 2,
+                                      self.en_spas, apply_angle, 1))
 
-    # Send SPAS12 at 20Hz (every 5 frames)
+    # SPAS12 at 20Hz to Bus 0 and Bus 1
     if (frame % 5) == 0:
-      can_sends.append(_create_spas12(1))  # bus=1 (MDPS CAN)
+      can_sends.append(_create_spas12(0))
+      can_sends.append(_create_spas12(1))
 
     if self.debug:
       print(f"SPAS | MDPS:{CS.spas_mdps11_stat} OP:{self.en_spas} active:{spas_active} angle:{apply_angle:.1f} drv_tq:{CS.out.steeringTorque:.0f}")
@@ -153,7 +140,7 @@ def _create_spas11(packer, car_fingerprint, frame, en_spas, apply_steer, bus):
     "CF_Spas_TestMode": 0,
     "CR_Spas_StrAngCmd": apply_steer,
     "CF_Spas_BeepAlarm": 0,
-    "CF_Spas_Mode_Seq": 1,  # non-legacy
+    "CF_Spas_Mode_Seq": 1,
     "CF_Spas_AliveCnt": frame % 0x200,
     "CF_Spas_Chksum": 0,
     "CF_Spas_PasVol": 0,
@@ -171,25 +158,11 @@ def _create_spas12(bus):
   return [1268, 0, b"\x00\x00\x00\x00\x00\x00\x00\x00", bus]
 
 
-def _create_eems11(packer, eems11_values, spas_active):
-  if spas_active:
-    values = {
-      "Brake_Pedal_Pos": 0,
-      "IG_Reactive_Stat": 0,
-      "Gear_Change": 0,
-      "Cruise_Limit_Status": 0,
-      "Cruise_Limit_Target": 0,
-      "Accel_Pedal_Pos": 0,
-      "CR_Vcu_AccPedDep_Pos": 0,
-    }
-  else:
-    values = dict(eems11_values)
-  return packer.make_can_msg("E_EMS11", 1, values)
-
-
-def _create_elect_gear_spoof(packer, gear_shifter, spas_active):
-  if spas_active:
+def _create_elect_gear(packer, gear_shifter, engaged):
+  if engaged:
+    # Spoofed: keep only Elect_Gear_Shifter, zero the rest
     values = {"Elect_Gear_Shifter": gear_shifter}
   else:
+    # Passthrough: send original Elect_Gear_Shifter (packer fills rest with 0 by default)
     values = {"Elect_Gear_Shifter": gear_shifter}
   return packer.make_can_msg("ELECT_GEAR", 1, values)
