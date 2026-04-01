@@ -358,8 +358,13 @@ static int hyundai_fwd_hook(int bus_num, int addr) {
     // else -1: radar messages not forwarded
   }
 
-  // Bus 2 → no forwarding (openpilot reads and creates spoofed messages)
-  // bus_fwd stays -1
+  // Bus 2 → Bus 0: before engage, forward all (TCS13 needs SCC at startup)
+  //                  after engage, block all (openpilot spoofs to Bus 0)
+  if (bus_num == 2) {
+    if (!controls_allowed) {
+      bus_fwd = 1;  // Bus 0
+    }
+  }
 
   return bus_fwd;
 }
