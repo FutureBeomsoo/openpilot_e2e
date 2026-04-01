@@ -83,6 +83,13 @@ def fingerprint(logcan, sendcan, num_pandas):
   ecu_rx_addrs = set()
   params = Params()
 
+  # SPAS: skip VIN/FW query to minimize delay before safety mode is set.
+  # TCS disables ACC if SCC messages are missing during the query period.
+  if params.get_bool('SpasEnabled'):
+    fixed_fingerprint = fixed_fingerprint or "KIA NIRO EV 2020"
+    skip_fw_query = True
+    cloudlog.warning("SPAS mode: skipping FW query, using fingerprint '%s'", fixed_fingerprint)
+
   if not skip_fw_query:
     # Vin query only reliably works through OBDII
     bus = 1

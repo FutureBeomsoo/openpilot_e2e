@@ -62,9 +62,9 @@ class CarState(CarStateBase):
       return self.update_canfd(cp, cp_cam)
 
     ret = car.CarState.new_message()
-    # SPAS: MDPS on Bus 1 (cp_body). SCC bus depends on car config (CAMERA_SCC_CAR), not SPAS.
+    # SPAS: MDPS on Bus 1 (cp_body). SCC on Bus 2 for CAMERA_SCC cars OR SPAS config.
     cp_mdps = cp_body if (self.spas_enabled and cp_body is not None) else cp
-    cp_cruise = cp_cam if self.CP.carFingerprint in CAMERA_SCC_CAR else cp
+    cp_cruise = cp_cam if (self.CP.carFingerprint in CAMERA_SCC_CAR or self.spas_enabled) else cp
     self.is_metric = cp.vl["CLU11"]["CF_Clu_SPEED_UNIT"] == 0
     speed_conv = CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS
 
@@ -343,8 +343,8 @@ class CarState(CarStateBase):
         ("SAS11", 100),
       ]
 
-    # SCC: on Bus 0 normally, on Bus 2 for CAMERA_SCC cars (read via get_cam_can_parser)
-    if not CP.openpilotLongitudinalControl and CP.carFingerprint not in CAMERA_SCC_CAR:
+    # SCC: on Bus 0 normally, on Bus 2 for CAMERA_SCC cars or SPAS config (read via get_cam_can_parser)
+    if not CP.openpilotLongitudinalControl and CP.carFingerprint not in CAMERA_SCC_CAR and not spas_enabled:
       signals += [
         ("MainMode_ACC", "SCC11"),
         ("VSetDis", "SCC11"),
@@ -463,8 +463,9 @@ class CarState(CarStateBase):
       ("LKAS11", 100)
     ]
 
-    # SCC on Bus 2: only for CAMERA_SCC cars (SPAS does not affect SCC bus)
-    if not CP.openpilotLongitudinalControl and CP.carFingerprint in CAMERA_SCC_CAR:
+    # SCC on Bus 2: for CAMERA_SCC cars or SPAS config (SCC on camera bus)
+    spas_enabled = Params().get_bool('SpasEnabled')
+    if not CP.openpilotLongitudinalControl and (CP.carFingerprint in CAMERA_SCC_CAR or spas_enabled):
       signals += [
         ("MainMode_ACC", "SCC11"),
         ("VSetDis", "SCC11"),
