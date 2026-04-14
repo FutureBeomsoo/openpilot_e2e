@@ -32,17 +32,17 @@ static int default_fwd_hook(int bus_num, int addr) {
 
   // Pre-init SW bridge for 3-bus SPAS layout:
   //   Bus 0 (Chassis) <-> Bus 2 (Camera+SCC): physically bridged via NC relay → no SW needed
-  //   Bus 1 (MDPS+Radar): physically isolated → must be bridged in SW before hyundai_fwd_hook takes over
+  //   Bus 1 (MDPS+Radar): physically isolated → SW bridge needed before hyundai_fwd_hook takes over
   //
-  // Fault chain without this fix:
-  //   SCC checks LKAS → LKAS checks MDPS → MDPS signal absent → SCC fault → SCC dead
+  // NOTE: Bus 0 forwarding is intentionally omitted.
+  //       Bus 0 and Bus 2 share the same physical wire (NC relay closed during pre-init).
+  //       SW-forwarding Bus 0 → Bus 2 would create duplicate frames on that wire,
+  //       causing CAN bus collision errors that disrupt reception on all buses including Bus 1.
+  //
+  // The health check chain (SCC→LKAS→MDPS) is satisfied by the Bus 1 → Bus 0+Bus 2 rule below,
+  // since MDPS ECUs transmit MDPS12/SAS11/MDPS11 unconditionally without needing to receive first.
 
-  // Bus 0 → Bus 1: Chassis messages to MDPS (replicates 순정 연결)
-  if (bus_num == 0) {
-    bus_fwd = 2;  // Bus 1 (bitmask bit1)
-  }
-
-  // Bus 1 → Bus 0 + Bus 2: MDPS signals for LKAS/SCC health checks
+  // Bus 1 → Bus 0 + Bus 2: forward MDPS signals so LKAS/SCC can see them during pre-init
   // Only MDPS12(593), SAS11(688), MDPS11(897) — radar frames are NOT forwarded
   if (bus_num == 1) {
     if (addr == 593 || addr == 688 || addr == 897) {
