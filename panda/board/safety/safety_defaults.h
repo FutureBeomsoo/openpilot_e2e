@@ -28,9 +28,29 @@ static int nooutput_tx_lin_hook(int lin_num, uint8_t *data, int len) {
 }
 
 static int default_fwd_hook(int bus_num, int addr) {
-  UNUSED(bus_num);
-  UNUSED(addr);
-  return -1;
+  int bus_fwd = -1;
+
+  // Pre-init SW bridge for 3-bus SPAS layout:
+  //   Bus 0 (Chassis) <-> Bus 2 (Camera+SCC): physically bridged via NC relay → no SW needed
+  //   Bus 1 (MDPS+Radar): physically isolated → must be bridged in SW before hyundai_fwd_hook takes over
+  //
+  // Fault chain without this fix:
+  //   SCC checks LKAS → LKAS checks MDPS → MDPS signal absent → SCC fault → SCC dead
+
+  // Bus 0 → Bus 1: Chassis messages to MDPS (replicates 순정 연결)
+  if (bus_num == 0) {
+    bus_fwd = 2;  // Bus 1 (bitmask bit1)
+  }
+
+  // Bus 1 → Bus 0 + Bus 2: MDPS signals for LKAS/SCC health checks
+  // Only MDPS12(593), SAS11(688), MDPS11(897) — radar frames are NOT forwarded
+  if (bus_num == 1) {
+    if (addr == 593 || addr == 688 || addr == 897) {
+      bus_fwd = 5;  // 0b101 = Bus 0 + Bus 2
+    }
+  }
+
+  return bus_fwd;
 }
 
 const safety_hooks nooutput_hooks = {
